@@ -14,7 +14,7 @@
 - Go 代码在 `backend/`，React 在 `frontend/`。API 字段变化须同步前后端类型和浏览器测试。
 - 不把耗时 HTTP 或 FFmpeg 放进数据库事务；单数据目录仅允许一个进程。
 - 配置变化更新 `.env.example` 和配置文档，依赖变化同步锁文件。不得提交 `.env`、运行数据、构建结果或日志。
-- 提交前确认暂存范围并运行 `node scripts/check-repository.mjs` 与 `git diff --cached --check`；检查器读取 Git 索引，不会扫描未暂存内容。
+- 提交前确认暂存范围并运行 `node scripts/check-docs.mjs`、`node scripts/check-repository.mjs` 与 `git diff --cached --check`；仓库检查器读取 Git 索引，不会扫描未暂存内容。
 - 后端运行 `go test ./...` 和 `go vet ./...`；并发变更运行 `go test -race ./...`（需要兼容 C 工具链）。
 - 前端先 `npm run build`，再运行对应 `npm run test:e2e`。测试使用临时数据和本地假模型，不访问实际服务。
 - 测试应约束外部行为、错误处理、并发和数据保留，避免仅复制实现细节。
@@ -24,4 +24,8 @@
 
 ## 文档
 
-详细规则只维护一处。新增文档更新 [文档索引](docs/README.md)。README 保持可快速上手；技术约束放维护文档，不混入日常阅读文案。
+详细规则只维护一处。新增文档更新 [文档索引](docs/README.md) 和 [README](README.md) 的文档表。README 保持可快速上手；技术约束放维护文档，不混入日常阅读文案。
+
+- [CLAUDE.md](CLAUDE.md) 只引用本文件，不另建规则；修改协作要求时同步检查它是否仍然准确。
+- 文档变更后运行 `node scripts/check-docs.mjs`，检查相对链接、索引覆盖、环境变量引用和示例路径。
+- 历史验证记录放 `docs/verification.md`，版本变化放 `CHANGELOG.md`，不要混入当前配置和使用说明。

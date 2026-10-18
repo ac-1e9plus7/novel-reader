@@ -1,6 +1,6 @@
 # 测试策略
 
-测试保护的是用户可观察的行为和数据边界，不依赖真实账户或模型密钥。
+测试保护的是用户可观察的行为和数据边界，不依赖真实账户或模型密钥。测试覆盖的架构背景见[架构与数据流](architecture.md)；真实服务验证另见[真实验证记录](verification.md)。
 
 ## 后端
 
@@ -70,14 +70,21 @@ macOS 使用 `scripts/macos/test.sh --browser --race` 和 `scripts/macos/smoke-t
 
 `.github/workflows/ci.yml` 在推送 `main`、Pull Request 和手动触发时执行，分为两层：
 
-1. **Repository hygiene**：检查 Git 索引中是否包含密钥、私有配置、数据库、音频或构建产物，并验证检查器自身、提交空白格式和 GitHub Actions 工作流语法（actionlint）；对 macOS 脚本执行 `bash -n` 和 ShellCheck。
+1. **Repository hygiene**：检查 Git 索引中是否包含密钥、私有配置、数据库、音频或构建产物，并验证检查器自身、文档链接与索引、提交空白格式和 GitHub Actions 工作流语法（actionlint）；对 macOS 脚本执行 `bash -n` 和 ShellCheck。文档检查使用 `node scripts/check-docs.mjs`。
 2. **Verify (Linux)**：仅在 Ubuntu 运行，检查 Go 格式、模块完整性、vet、race、覆盖率和构建；通过 npm 锁文件安装、TypeScript 检查、前端构建及桌面/手机浏览器测试。安装 FFmpeg 与 lsof 后验证音频编解码和 Shell 服务启停。
 
 CI 不再包含 Windows runner 或 Windows 专用测试。Windows PowerShell 脚本保留供本机使用。Linux 上的 Shell 启停验证不能替代 macOS 真机验证。
 
 流水线只授予 `contents: read`，Action 固定到 commit SHA，不注入模型密钥；同一分支的新运行取消旧运行。测试报告和 Linux 覆盖率保留 7 天。CI 不执行 `cmd/probe`，不会调用收费模型。
 
-提交前在根目录运行 `node scripts/check-repository.mjs`，它检查的是 **Git 暂存区**；先执行 `git add`，并用 `git diff --cached --stat` 确认范围。检查器发现问题只输出文件名和规则名，不回显密钥。它是针对本项目的常见泄漏防线，不等同于完整安全审计。
+提交前在根目录运行：
+
+```sh
+node scripts/check-docs.mjs
+node scripts/check-repository.mjs
+```
+
+`check-repository.mjs` 检查的是 **Git 暂存区**；先执行 `git add`，并用 `git diff --cached --stat` 确认范围。检查器发现问题只输出文件名和规则名，不回显密钥。它是针对本项目的常见泄漏防线，不等同于完整安全审计。`check-docs.mjs` 检查文档相对链接、索引覆盖、环境变量引用和示例路径，不读取运行数据。
 
 完整运行记录见 [GitHub Actions](https://github.com/ac-1e9plus7/novel-reader/actions/workflows/ci.yml)。本地测试通过不代表远端 CI 已完成。
 

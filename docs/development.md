@@ -1,5 +1,7 @@
 # 开发指南
 
+本文聚焦代码位置和开发命令。请求流、任务生命周期和数据库关系见[架构与数据流](architecture.md)；HTTP 契约见[HTTP API](api.md)。
+
 ## 结构
 
 | 文件 | 职责 |
@@ -55,44 +57,30 @@ macOS 可在根目录使用 `(cd backend && go build -o ../bin/novel-reader ./cm
 
 ## API
 
-所有写请求携带 `X-Reader-Request: 1`；浏览器还需要同源 Origin。JSON 最大 4 MiB。长任务返回 202 和任务 ID。
+所有写请求携带 `X-Reader-Request: 1`；浏览器发送的 `Origin` 必须与 `Host` 一致。JSON 最大 4 MiB，未知字段会被拒绝。长任务返回 202 和任务 ID。
 
-| 方法与路径 | 用途 |
-| --- | --- |
-| GET / POST `/api/books` | 书架与创建小说 |
-| GET / POST `/api/books/{id}/chapters` | 目录与导入章节 |
-| PUT `/api/books/{id}/chapters/order` | `{expected_order:[id...],chapter_ids:[id...]}`，完整排序与旧目录快照校验 |
-| DELETE `/api/chapters/{id}` | `{revision}`，级联删除本章数据并取消任务 |
-| GET `/api/chapters/{id}` | 完整当前章节及片段 |
-| PATCH `/api/chapters/{id}/source` | `{title,raw,revision}` |
-| POST `/api/chapters/{id}/translation-jobs` | `{revision,segments:[一个段落ID],force:false}`；空数组、多段均拒绝 |
-| GET / POST `/api/chapters/{id}/translation-batches` | 查询批次；`{revision}` 为缺失译文建立单段任务组 |
-| POST `/api/translation-batches/{id}/cancel` / `retry` | 停止剩余任务／新建只补齐缺失译文的批次 |
-| PATCH `/api/settings/audio` | `{concurrency:10}`，整数 1–32，保存并即时应用 |
-| POST `/api/chapters/{id}/audio-jobs` | `{revision,segments:[],force:false}`，空 segments 表示整章语音 |
-| PATCH `/api/segments/{id}/translation` | `{text,revision}` |
-| PATCH `/api/chapters/{id}/translations` | `{revision,items:[{segment_id,text,revision}]}`；只提交有变更的非空译文，事务内保存 |
-| PATCH `/api/segments/{id}/speech-text` | `{text,revision}` |
-| GET / PUT `/api/books/{id}/glossary` | `{revision,terms:[{source,target,reading}]}` |
-| GET / PUT `/api/books/{id}/progress` | `{chapter_id,segment_id,clip_id,seconds,revision}` |
-| GET `/api/jobs?chapter={id}` | 最近 50 条任务 |
-| GET `/api/jobs/{id}` | 含分项状态的任务详情 |
-| GET `/api/jobs/{id}/attempts` | 耗时、用量与结果状态 |
-| POST `/api/jobs/{id}/cancel` / `retry` | 停止、继续未成功部分 |
-| GET `/api/events?chapter={id}` | 每秒发送数据库任务快照的 SSE |
-| GET / HEAD `/api/audio/{id}?format=wav` | WAV 兼容播放，支持 Range / ETag |
-| POST `/api/cache/cleanup` | 清理未引用音频 |
-| GET `/api/config` / `/api/health` | 无密钥状态、健康检查 |
+完整契约见 [HTTP API](api.md)，包括请求/响应形状、状态码、SSE 事件和输入限制。路由注册在 `backend/internal/app/server.go`，上游协议在 `backend/internal/app/providers.go`。
 
-单段翻译重复提交同一段返回活动任务，不同段可以排队，同章串行执行。整章通过批次接口创建独立单段任务，译文标记人工后，即使 `force=true` 也不会覆盖。SSE 保留默认 jobs 消息，并增加命名 `batches` 事件，避免只显示最近 50 个任务时丢失整章进度。
+修改 API 字段时必须同步：
 
-## 数据库演进
+- `backend/internal/app/model.go` 和 `server.go`
+- `frontend/src/types.ts` 和 `api.ts`
+- `frontend/e2e/` 中的浏览器流程
+- `docs/api.md`
 
-当前 schema 版本为 3。升级前用 SQLite `VACUUM INTO` 生成 `DATA_DIR/backups/before-v3-*.sqlite3` 一致性快照。版本 2 作废旧多段时代的未完成翻译；版本 3 只增加批次分组与高级设置表，不重新作废版本 2 的单段任务。旧程序会拒绝打开新版数据库，回滚需停服并恢复备份。音频未被迁移修改，但完整备份仍应包含 DATA_DIR。
+单段翻译重复提交同一段会返回活动任务，不同段可以排队，同章串行执行。整章通过批次接口创建独立单段任务，译文标记人工后，即使 `force=true` 也不会覆盖。SSE 保留默认任务消息，并增加命名 `batches` 事件，避免只显示最近 50 个任务时丢失整章进度。
 
-服务启动自动执行迁移；也可在停服后构建 `backend/cmd/migrate`，从项目根目录运行该工具，只更新数据库，不调用模型。
+## 数据库与提示词
+
+当前 schema 版本为 3。服务启动会自动迁移；也可在停服后构建 `backend/cmd/migrate`，从项目根目录运行该工具，只更新数据库，不调用模型。迁移备份、版本 2/3 差异和回滚见[升级与迁移](upgrading.md)；表结构和数据流见[架构与数据流](architecture.md#数据模型)。
 
 schema 内保留来源与翻译历史；音频是独立资源，按 clip 引用。分段偏移是 Go Unicode rune 下标，前端不能直接当 UTF-16 下标截取。
+
+提示词版本定义在 `backend/internal/app/providers.go`：
+
+- `translationPromptVersion` 影响翻译缓存键和旧任务有效性。
+- `speechPromptVersion` 影响语音缓存键；它与翻译提示词版本相互独立。
+- 修改提示词语义时必须递增对应版本常量，并在提交前运行相关后端和浏览器测试。
 
 ## 检查
 
@@ -104,6 +92,12 @@ macOS：
 
 ```bash
 ./scripts/macos/test.sh --browser --race
+```
+
+文档变更后运行：
+
+```sh
+node scripts/check-docs.mjs
 ```
 
 分项命令及实际测试边界见 [测试策略](testing.md)。前端依赖锁定于 `package-lock.json`，Go 锁定于 `go.mod` / `go.sum`。格式化使用 `gofmt` 和 `npx prettier --write src e2e *.ts`。
