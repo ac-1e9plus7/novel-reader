@@ -1,0 +1,130 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Test repository guard
+        run: node --test scripts/check-repository.test.mjs
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: backend/go.mod
+          cache: false
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -color
+      - name: Check tracked files and secrets
+        run: node scripts/check-repository.mjs
+      - name: Check whitespace
+        run: git show --format= --check HEAD
+
+  verify:
+    name: Verify (${{ matrix.os }})
+    needs: repository
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install FFmpeg for lossless audio tests
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+      - name: Verify Go formatting
+        shell: bash
+        working-directory: backend
+        run: |
+          unformatted=$(gofmt -l cmd internal)
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Verify Go modules
+        working-directory: backend
+        run: go mod verify
+      - name: Vet backend
+        working-directory: backend
+        run: go vet ./...
+      - name: Test backend with race detection and coverage
+        if: runner.os == 'Linux'
+        working-directory: backend
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: Test backend on Windows
+        if: runner.os == 'Windows'
+        working-directory: backend
+        run: go test -count=1 ./...
+      - name: Build Go commands
+        working-directory: backend
+        run: go build ./...
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Typecheck and build frontend
+        working-directory: frontend
+        run: npm run build
+      - name: Install browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Test desktop and mobile reading flows
+        working-directory: frontend
+        run: npm run test:e2e
+      - name: Build Windows server
+        if: runner.os == 'Windows'
+        working-directory: backend
+        run: go build -trimpath -o ../bin/novel-reader.exe ./cmd/server
+      - name: Test Windows service lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/windows/smoke-test.ps1
+      - name: Ensure builds did not modify tracked files
+        run: git diff --exit-code
+      - name: Upload test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: test-reports-${{ matrix.os }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            backend/coverage.out
+            frontend/playwright-report
+            frontend/test-results
