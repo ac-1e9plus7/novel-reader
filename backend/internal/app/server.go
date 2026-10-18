@@ -166,6 +166,20 @@ func (s *Server) routes() http.Handler {
 			jsonResponse(w, 202, v)
 		})
 	}
+	m.HandleFunc("PATCH /api/chapters/{chapter}/translations", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Revision int                     `json:"revision"`
+			Items    []ManualTranslationEdit `json:"items"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		if e := s.Store.EditChapterTranslations(r.PathValue("chapter"), in.Revision, in.Items); e != nil {
+			failure(w, e)
+			return
+		}
+		jsonResponse(w, 200, map[string]bool{"ok": true})
+	})
 	m.HandleFunc("PATCH /api/segments/{segment}/translation", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Text     string `json:"text"`

@@ -600,9 +600,48 @@ input[type="range"] {
 }
 .chapter-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: center;
   margin-top: 25px;
+}
+.translation-optional {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.8;
+  margin-top: 16px;
+}
+.manual-rows {
+  max-height: 52vh;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+.manual-row {
+  border-bottom: 1px solid var(--line);
+  padding: 18px 0;
+}
+.manual-source {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: serif;
+  line-height: 1.9;
+  margin-bottom: 12px;
+}
+.manual-source span {
+  display: inline-block;
+  color: var(--muted);
+  font: 11px sans-serif;
+  margin-right: 12px;
+}
+.manual-error {
+  color: #a74838;
+  font-size: 12px;
+  line-height: 1.8;
+  margin: 12px 0;
+}
+.manual-editor .modal-footer {
+  align-items: center;
+  flex-wrap: wrap;
 }
 .chapter-actions .button {
   padding: 8px 15px;

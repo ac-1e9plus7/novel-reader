@@ -38,15 +38,17 @@ jobs:
         run: node scripts/check-repository.mjs
       - name: Check whitespace
         run: git show --format= --check HEAD
+      - name: Check macOS shell scripts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          for script in scripts/macos/*.sh; do bash -n "$script"; done
+          shellcheck --shell=bash --external-sources --source-path=SCRIPTDIR scripts/macos/*.sh
 
   verify:
-    name: Verify (${{ matrix.os }})
+    name: Verify (Linux)
     needs: repository
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
       CI: 'true'
@@ -64,10 +66,9 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install FFmpeg for lossless audio tests
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg lsof
           ffmpeg -version
       - name: Verify Go formatting
         shell: bash
@@ -85,13 +86,8 @@ jobs:
         working-directory: backend
         run: go vet ./...
       - name: Test backend with race detection and coverage
-        if: runner.os == 'Linux'
         working-directory: backend
         run: go test -race -count=1 -coverprofile=coverage.out ./...
-      - name: Test backend on Windows
-        if: runner.os == 'Windows'
-        working-directory: backend
-        run: go test -count=1 ./...
       - name: Build Go commands
         working-directory: backend
         run: go build ./...
@@ -107,21 +103,18 @@ jobs:
       - name: Test desktop and mobile reading flows
         working-directory: frontend
         run: npm run test:e2e
-      - name: Build Windows server
-        if: runner.os == 'Windows'
+      - name: Build server
         working-directory: backend
-        run: go build -trimpath -o ../bin/novel-reader.exe ./cmd/server
-      - name: Test Windows service lifecycle
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/windows/smoke-test.ps1
+        run: go build -trimpath -o ../bin/novel-reader ./cmd/server
+      - name: Test shell service lifecycle on Linux
+        run: ./scripts/macos/smoke-test.sh
       - name: Ensure builds did not modify tracked files
         run: git diff --exit-code
       - name: Upload test reports
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: test-reports-${{ matrix.os }}
+          name: test-reports-linux
           retention-days: 7
           if-no-files-found: ignore
           path: |

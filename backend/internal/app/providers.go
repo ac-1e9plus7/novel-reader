@@ -48,6 +48,9 @@ func (c Config) translationKey() string {
 	if c.LLMAPIStyle == "chat_completions" {
 		return digest([]any{c.ResponsesURL, c.Model, c.Structured, translationPromptVersion, c.LLMAPIStyle})
 	}
+	if strings.HasPrefix(c.Model, "deepseek-") {
+		return digest([]any{c.ResponsesURL, c.Model, c.Structured, translationPromptVersion, "responses", "reasoning:none"})
+	}
 	return digest([]any{c.ResponsesURL, c.Model, c.Structured, translationPromptVersion})
 }
 func (c Config) speechKey() string {
@@ -133,6 +136,9 @@ func (p *Provider) Translate(ctx context.Context, in ItemPayload) (TranslateResu
 		return p.translateChat(ctx, in, instructions, schema, string(payload))
 	}
 	body := map[string]any{"model": c.Model, "store": false, "max_output_tokens": 12000, "instructions": instructions, "input": []any{map[string]any{"role": "user", "content": []any{map[string]string{"type": "input_text", "text": string(payload)}}}}}
+	if strings.HasPrefix(c.Model, "deepseek-") {
+		body["reasoning"] = map[string]string{"effort": "none"}
+	}
 	if c.Structured {
 		body["text"] = map[string]any{"format": map[string]any{"type": "json_schema", "name": "novel_translation", "strict": true, "schema": schema}}
 	} else {

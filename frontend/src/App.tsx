@@ -32,6 +32,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { api, ApiError, audioURL } from "./api";
+import ManualTranslationEditor from "./ManualTranslationEditor";
 import type {
   Book,
   Chapter,
@@ -112,6 +113,7 @@ function Button({
   );
 }
 export default function App() {
+  const [manualChapter, setManualChapter] = useState<Chapter | null>(null);
   const [books, setBooks] = useState<Book[]>([]),
     [book, setBook] = useState<Book | null>(null),
     [chapters, setChapters] = useState<Chapter[]>([]),
@@ -631,7 +633,7 @@ export default function App() {
         setModal(null);
         setChapters(await api<Chapter[]>("/books/" + book.id + "/chapters"));
         await openChapter(v.id);
-        setNotice("章节已保存，可点击“生成翻译”开始。");
+        setNotice("章节已保存。可直接阅读、朗读原文，或手动填写译文。");
       } else if (modal === "source" && chapter) {
         activeAudio.current = null;
         audio.current?.pause();
@@ -864,7 +866,7 @@ export default function App() {
                     <small>
                       {c.translated > 0
                         ? `${c.translated}/${c.total} 段已翻译`
-                        : "等待翻译"}
+                        : "原文可读 · 未填译文"}
                     </small>
                   </span>
                   {c.total > 0 && c.total === c.translated && (
@@ -951,6 +953,10 @@ export default function App() {
                     </button>
                   </div>
                   <div className="chapter-actions">
+                    <Button secondary onClick={() => setManualChapter(chapter)}>
+                      <Pencil size={16} />
+                      手动输入译文
+                    </Button>
                     <Button
                       disabled={
                         busy ||
@@ -981,6 +987,11 @@ export default function App() {
                       准备整章语音
                     </Button>
                   </div>
+                  {ready < chapter.segments.length && (
+                    <p className="translation-optional">
+                      译文可稍后补充。没有译文也能朗读原文、调整读音并保存阅读位置。
+                    </p>
+                  )}
                 </div>
                 {jobs.length > 0 && (
                   <section className="jobs" aria-label="处理记录">
@@ -1101,7 +1112,7 @@ export default function App() {
                           <p>
                             {seg.translation || (
                               <span className="untranslated">
-                                译文将在生成后显示在这里
+                                尚未填写译文，可手动输入或稍后补充
                               </span>
                             )}
                           </p>
@@ -1388,10 +1399,25 @@ export default function App() {
           </form>
         </Modal>
       )}
+      {manualChapter && (
+        <ManualTranslationEditor
+          chapter={manualChapter}
+          onClose={() => setManualChapter(null)}
+          onSaved={() => {
+            setManualChapter(null);
+            setNotice("手工译文已保存，未填写的段落保持不变。");
+            void refresh().catch(fail);
+          }}
+        />
+      )}
       {edit && (
         <Modal
           title={
-            edit.kind === "translation" ? "校对中文译文" : "调整日语朗读文本"
+            edit.kind === "translation"
+              ? edit.segment.translation
+                ? "校对中文译文"
+                : "手动填写中文译文"
+              : "调整日语朗读文本"
           }
           onClose={() => {
             if (

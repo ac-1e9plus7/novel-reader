@@ -16,9 +16,12 @@
 | `backend/internal/app/audio.go` | PCM/WAV/FLAC、原子发布、去重和缓存清理 |
 | `backend/internal/app/server.go` | REST、SSE、音频 Range 和前端静态资源 |
 | `frontend/src/App.tsx` | 书架、阅读、编辑、任务与播放器编排 |
+| `frontend/src/ManualTranslationEditor.tsx` | 章节手工译文、部分填写、冲突后的草稿保留 |
 | `frontend/src/api.ts` / `types.ts` | 请求封装和接口类型 |
 | `frontend/src/style.css` | 主题、阅读排版和移动布局 |
 | `frontend/e2e/` | 真实 Go / SQLite + 假模型的浏览器流程 |
+| `scripts/windows/` | PowerShell 安装、启停、测试和启动验证 |
+| `scripts/macos/` | Bash 3.2 兼容的安装、启停、测试和启动验证；`common.sh` 为内部共享函数 |
 
 目前代码按领域文件组织在一个 Go package 内，便于事务边界统一维护。拆包时不得绕过 Store 锁或版本检查。
 
@@ -43,6 +46,8 @@ npm --prefix frontend run dev
 
 Vite 代理 `/api` 到 `127.0.0.1:8787`。变更后端端口时同步调整 `vite.config.ts`。Go 没有自动热重载，修改后重新构建并启动；服务重启会中断正在运行的模型任务。
 
+macOS 可在根目录使用 `(cd backend && go build -o ../bin/novel-reader ./cmd/server)` 构建，再运行 `./bin/novel-reader`；也可使用 [平台脚本](getting-started.md#macos)。
+
 ## API
 
 所有写请求携带 `X-Reader-Request: 1`；浏览器还需要同源 Origin。JSON 最大 4 MiB。长任务返回 202 和任务 ID。
@@ -56,6 +61,7 @@ Vite 代理 `/api` 到 `127.0.0.1:8787`。变更后端端口时同步调整 `vit
 | POST `/api/chapters/{id}/translation-jobs` | `{revision,segments:[],force:false}` |
 | POST `/api/chapters/{id}/audio-jobs` | 同上，空 segments 表示整章 |
 | PATCH `/api/segments/{id}/translation` | `{text,revision}` |
+| PATCH `/api/chapters/{id}/translations` | `{revision,items:[{segment_id,text,revision}]}`；只提交有变更的非空译文，事务内保存 |
 | PATCH `/api/segments/{id}/speech-text` | `{text,revision}` |
 | GET / PUT `/api/books/{id}/glossary` | `{revision,terms:[{source,target,reading}]}` |
 | GET / PUT `/api/books/{id}/progress` | `{chapter_id,segment_id,clip_id,seconds,revision}` |
@@ -80,6 +86,12 @@ schema 内保留来源与翻译历史；音频是独立资源，按 clip 引用�
 
 ```powershell
 .\scripts\windows\test.ps1 -Browser
+```
+
+macOS：
+
+```bash
+./scripts/macos/test.sh --browser --race
 ```
 
 分项命令及实际测试边界见 [测试策略](testing.md)。前端依赖锁定于 `package-lock.json`，Go 锁定于 `go.mod` / `go.sum`。格式化使用 `gofmt` 和 `npx prettier --write src e2e *.ts`。

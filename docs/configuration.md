@@ -16,19 +16,21 @@ TRANSLATION_BATCH_CHARS=2400
 
 服务需兼容 `POST /responses`。请求包含 `store=false`、固定来源 ID、上下文、术语表和 JSON Schema；服务不支持 Schema 时设 `RESPONSES_STRUCTURED_OUTPUT=false`，服务端仍进行 JSON 和覆盖校验。模型必须返回 `status=completed`。
 
-### DeepSeek / Chat Completions
+### DeepSeek / Responses（默认）
 
 使用 [DeepSeek + Gemini 配置模板](../config/deepseek-gemini.env.example)：
 
 ```dotenv
-LLM_API_STYLE=chat_completions
+LLM_API_STYLE=responses
 RESPONSES_BASE_URL=https://api.deepseek.com
 RESPONSES_API_KEY=填写DeepSeek密钥
 RESPONSES_MODEL=deepseek-flash
 RESPONSES_STRUCTURED_OUTPUT=true
 ```
 
-变量名保留 `RESPONSES_*` 以便兼容原有配置，但协议由 `LLM_API_STYLE` 明确指定。Chat Completions 调用 `/chat/completions`，使用 system/user messages；结构化开关启用 JSON object 模式。DeepSeek 请求显式关闭 thinking，返回必须以 `finish_reason=stop` 正常结束，之后执行相同的 ID 覆盖校验。不会在失败后悄悄切换协议再调用。参考 [DeepSeek 官方接口文档](https://api-docs.deepseek.com/api/create-chat-completion/)。
+DeepSeek 官方支持 `POST /responses` 和 `text.format=json_schema`，本项目默认使用该协议。请求通过 `instructions` 和 `input` 传入任务，通过 `reasoning.effort=none` 关闭思考模式；仅解析 `output_text`，不把 reasoning 内容混入译文。结果必须为 `status=completed`，随后进行 ID 覆盖校验。参考 [DeepSeek Responses 指南](https://api-docs.deepseek.com/guides/responses_api/) 和 [接口参数](https://api-docs.deepseek.com/api/create-response/)。
+
+此前把 DeepSeek 模板设为 Chat Completions 并不意味着它不支持 Responses；当前已纠正默认配置。`LLM_API_STYLE=chat_completions` 仍可显式选择，使用 `/chat/completions`、JSON object 模式及 `finish_reason=stop` 校验。失败时不会自动切换协议重复调用。
 
 每批目标默认不超过 2400 日文字符；不是精确 token 数。原段超过 900 Unicode 字符时内部拆分，保留原文位置和自然段编号。返回上限为 12000 tokens；截断、缺段、重复 ID、空译文会使本批失败。可调小批次后创建新任务。
 
@@ -58,9 +60,9 @@ TTS_MODEL=填写支持语音输出的模型名称
 TTS_VOICE=填写对应声音名称
 ```
 
-本项目的 Gemini 配置优先使用女性声音 **Kore**；另可选 Aoede、Sulafat。声音性别与官方风格说明、原生 Gemini API 与 OpenRouter 的区别见 [Gemini TTS 接入说明](gemini-tts.md)。
+本项目的 Gemini 配置默认使用女性声音 **Aoede**（Breezy），备选 Sulafat（Warm）。`TTS_VOICE` 未填时，Gemini / OpenRouter 自动选择 Aoede，OpenAI 仍选择 marin；显式填写的声音优先。声音性别与官方风格说明、原生 Gemini API 与 OpenRouter 的区别见 [Gemini TTS 接入说明](gemini-tts.md)。
 
-沿用参考项目的适配逻辑：`google/gemini-` 前缀请求 PCM；从响应 Content-Type 的 `rate` 和 `channels` 读取元数据，缺失时拒绝猜测。其他模型请求 MP3，由 FFmpeg 解码为 PCM WAV。`google/gemini-3.8` 和 `openai/` 前缀分别附带对应 provider options。自定义服务如协议不同，需要扩展适配器并补协议测试。
+`google/gemini-` 前缀请求 PCM；从响应 Content-Type 的 `rate` 和 `channels` 读取元数据，缺失时拒绝猜测。其他模型请求 MP3，由 FFmpeg 解码为 PCM WAV。`google/gemini-3.8` 和 `openai/` 前缀分别附带对应 provider options。自定义服务如协议不同，需要扩展适配器并补协议测试。
 
 **Azure Speech**：
 

@@ -278,14 +278,67 @@ func (s *Store) EditTranslation(seg, text string, revision int) error {
 		return e
 	}
 	defer tx.Rollback()
+	if e = saveManualTranslation(tx, "", seg, text, revision); e != nil {
+		return e
+	}
+	return tx.Commit()
+}
+
+type ManualTranslationEdit struct {
+	SegmentID string `json:"segment_id"`
+	Text      string `json:"text"`
+	Revision  int    `json:"revision"`
+}
+
+// Save only submitted paragraphs. All edits share a transaction so a stale
+// paragraph cannot leave a chapter half saved. No provider is involved.
+func (s *Store) EditChapterTranslations(chapter string, revision int, edits []ManualTranslationEdit) error {
+	if len(edits) == 0 || len(edits) > 5000 {
+		return fmt.Errorf("每次请提交 1–5000 段译文")
+	}
+	seen := map[string]bool{}
+	for _, edit := range edits {
+		if seen[edit.SegmentID] {
+			return fmt.Errorf("译文段落重复")
+		}
+		seen[edit.SegmentID] = true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, e := s.DB.Begin()
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	var current int
+	if e = tx.QueryRow("SELECT revision FROM chapters WHERE id=?", chapter).Scan(&current); e == sql.ErrNoRows {
+		return ErrNotFound
+	} else if e != nil {
+		return e
+	}
+	if current != revision {
+		return ErrConflict
+	}
+	for _, edit := range edits {
+		if e = saveManualTranslation(tx, chapter, edit.SegmentID, edit.Text, edit.Revision); e != nil {
+			return e
+		}
+	}
+	return tx.Commit()
+}
+
+func saveManualTranslation(tx *sql.Tx, expectedChapter, seg, text string, revision int) error {
 	var current int
 	var chapter, source string
-	e = tx.QueryRow("SELECT s.chapter_id,s.text,coalesce(t.revision,0) FROM segments s LEFT JOIN translations t ON t.segment_id=s.id WHERE s.id=?", seg).Scan(&chapter, &source, &current)
+	e := tx.QueryRow("SELECT s.chapter_id,s.text,coalesce(t.revision,0) FROM segments s LEFT JOIN translations t ON t.segment_id=s.id WHERE s.id=?", seg).Scan(&chapter, &source, &current)
 	if e == sql.ErrNoRows {
 		return ErrNotFound
 	}
 	if e != nil {
 		return e
+	}
+	if expectedChapter != "" && chapter != expectedChapter {
+		return fmt.Errorf("段落不属于当前章节")
 	}
 	if current != revision {
 		return ErrConflict
@@ -301,7 +354,7 @@ func (s *Store) EditTranslation(seg, text string, revision int) error {
 	if e != nil {
 		return e
 	}
-	return tx.Commit()
+	return nil
 }
 func (s *Store) EditSpeech(seg, text string, revision int) error {
 	if strings.TrimSpace(text) == "" || len([]rune(text)) > 4000 {
