@@ -15,7 +15,7 @@ func TestNewerDatabaseIsRefusedWithoutDowngrade(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = s.DB.Exec("INSERT INTO schema_migrations VALUES(2)"); e != nil {
+	if _, e = s.DB.Exec("INSERT INTO schema_migrations VALUES(?)", schemaVersion+1); e != nil {
 		t.Fatal(e)
 	}
 	s.Close()
@@ -30,7 +30,7 @@ func TestGlossaryChangesBlockQueuedTranslation(t *testing.T) {
 	s := newTestServer(t, tr, &fakeSynth{})
 	b, c := seed(t, s.Store, "人物の名前。")
 	s.Engine.Close()
-	j, e := s.Engine.Create(c.ID, "translation", 1, nil, false)
+	j, e := s.Engine.Create(c.ID, "translation", 1, []string{c.Segments[0].ID}, false)
 	if e != nil {
 		t.Fatal(e)
 	}

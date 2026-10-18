@@ -9,14 +9,19 @@
 | `backend/cmd/probe/main.go` | 需显式确认付费的中性短文真实接口验证，使用独立数据库 |
 | `backend/internal/app/config.go` | 环境配置、公开状态和模型配置指纹 |
 | `backend/internal/app/model.go` | API 类型、Unicode 分段 |
-| `backend/internal/app/schema.sql` | SQLite 初始化 schema，版本 1 |
+| `backend/internal/app/schema.sql` / `migration_v*.sql` | SQLite 初始结构、旧任务作废和批次／设置迁移 |
+| `backend/internal/app/chapters.go` | 章节排序、删除、在途任务取消 |
+| `backend/cmd/migrate/main.go` | 离线应用迁移，不启动工作线程或调用模型 |
 | `backend/internal/app/store.go` | 原文、译文、术语、进度、快照和事务 |
 | `backend/internal/app/providers.go` | Responses / TTS HTTP 协议、结构校验 |
 | `backend/internal/app/jobs.go` | 持久化队列、重试、取消和版本检查 |
+| `backend/internal/app/translation_batches.go` | 整章翻译分组、创建单段任务、汇总进度、停止和补齐 |
+| `backend/internal/app/audio_settings.go` | 持久化语音并发设置和可动态调整的全局限流器 |
 | `backend/internal/app/audio.go` | PCM/WAV/FLAC、原子发布、去重和缓存清理 |
 | `backend/internal/app/server.go` | REST、SSE、音频 Range 和前端静态资源 |
 | `frontend/src/App.tsx` | 书架、阅读、编辑、任务与播放器编排 |
 | `frontend/src/ManualTranslationEditor.tsx` | 章节手工译文、部分填写、冲突后的草稿保留 |
+| `frontend/src/AudioSettings.tsx` | 高级语音生成并发设置 |
 | `frontend/src/api.ts` / `types.ts` | 请求封装和接口类型 |
 | `frontend/src/style.css` | 主题、阅读排版和移动布局 |
 | `frontend/e2e/` | 真实 Go / SQLite + 假模型的浏览器流程 |
@@ -56,10 +61,15 @@ macOS 可在根目录使用 `(cd backend && go build -o ../bin/novel-reader ./cm
 | --- | --- |
 | GET / POST `/api/books` | 书架与创建小说 |
 | GET / POST `/api/books/{id}/chapters` | 目录与导入章节 |
+| PUT `/api/books/{id}/chapters/order` | `{expected_order:[id...],chapter_ids:[id...]}`，完整排序与旧目录快照校验 |
+| DELETE `/api/chapters/{id}` | `{revision}`，级联删除本章数据并取消任务 |
 | GET `/api/chapters/{id}` | 完整当前章节及片段 |
 | PATCH `/api/chapters/{id}/source` | `{title,raw,revision}` |
-| POST `/api/chapters/{id}/translation-jobs` | `{revision,segments:[],force:false}` |
-| POST `/api/chapters/{id}/audio-jobs` | 同上，空 segments 表示整章 |
+| POST `/api/chapters/{id}/translation-jobs` | `{revision,segments:[一个段落ID],force:false}`；空数组、多段均拒绝 |
+| GET / POST `/api/chapters/{id}/translation-batches` | 查询批次；`{revision}` 为缺失译文建立单段任务组 |
+| POST `/api/translation-batches/{id}/cancel` / `retry` | 停止剩余任务／新建只补齐缺失译文的批次 |
+| PATCH `/api/settings/audio` | `{concurrency:10}`，整数 1–32，保存并即时应用 |
+| POST `/api/chapters/{id}/audio-jobs` | `{revision,segments:[],force:false}`，空 segments 表示整章语音 |
 | PATCH `/api/segments/{id}/translation` | `{text,revision}` |
 | PATCH `/api/chapters/{id}/translations` | `{revision,items:[{segment_id,text,revision}]}`；只提交有变更的非空译文，事务内保存 |
 | PATCH `/api/segments/{id}/speech-text` | `{text,revision}` |
@@ -74,11 +84,13 @@ macOS 可在根目录使用 `(cd backend && go build -o ../bin/novel-reader ./cm
 | POST `/api/cache/cleanup` | 清理未引用音频 |
 | GET `/api/config` / `/api/health` | 无密钥状态、健康检查 |
 
-同一章节、同类活动任务重复创建返回已有任务。客户端要等待其完成后再提交新的不同选区。译文标记人工后，即使 `force=true` 也不会覆盖。
+单段翻译重复提交同一段返回活动任务，不同段可以排队，同章串行执行。整章通过批次接口创建独立单段任务，译文标记人工后，即使 `force=true` 也不会覆盖。SSE 保留默认 jobs 消息，并增加命名 `batches` 事件，避免只显示最近 50 个任务时丢失整章进度。
 
 ## 数据库演进
 
-当前 schema 版本为 1。后续已有字段或约束变更需要显式迁移、版本检查及旧库测试，不可仅修改 CREATE TABLE 后假定已有库会自动更新。迁移前建议备份完整 DATA_DIR。
+当前 schema 版本为 3。升级前用 SQLite `VACUUM INTO` 生成 `DATA_DIR/backups/before-v3-*.sqlite3` 一致性快照。版本 2 作废旧多段时代的未完成翻译；版本 3 只增加批次分组与高级设置表，不重新作废版本 2 的单段任务。旧程序会拒绝打开新版数据库，回滚需停服并恢复备份。音频未被迁移修改，但完整备份仍应包含 DATA_DIR。
+
+服务启动自动执行迁移；也可在停服后构建 `backend/cmd/migrate`，从项目根目录运行该工具，只更新数据库，不调用模型。
 
 schema 内保留来源与翻译历史；音频是独立资源，按 clip 引用。分段偏移是 Go Unicode rune 下标，前端不能直接当 UTF-16 下标截取。
 

@@ -146,22 +146,23 @@ type audioLock struct {
 	refs int
 }
 type Audio struct {
-	Store    *Store
-	Config   Config
-	Synth    Synthesizer
-	keysMu   sync.Mutex
-	keys     map[string]*audioLock
-	slots    chan struct{}
-	compress chan string
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	enabled  bool
+	Store      *Store
+	Config     Config
+	Synth      Synthesizer
+	keysMu     sync.Mutex
+	keys       map[string]*audioLock
+	limiter    *synthesisLimiter
+	settingsMu sync.Mutex
+	compress   chan string
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	enabled    bool
 }
 
 func NewAudio(s *Store, c Config, synth Synthesizer) *Audio {
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &Audio{Store: s, Config: c, Synth: synth, keys: map[string]*audioLock{}, slots: make(chan struct{}, c.TTSConcurrency), compress: make(chan string, 128), ctx: ctx, cancel: cancel}
+	a := &Audio{Store: s, Config: c, Synth: synth, keys: map[string]*audioLock{}, limiter: newSynthesisLimiter(c.TTSConcurrency), compress: make(chan string, 128), ctx: ctx, cancel: cancel}
 	probe, cancelProbe := context.WithTimeout(ctx, 10*time.Second)
 	raw := makeWAV(make([]byte, 480), 24000, 1)
 	encoded, e := ffmpeg(probe, c.FFmpeg, raw, "-i", "pipe:0", "-c:a", "flac", "-f", "flac", "pipe:1")
@@ -234,13 +235,11 @@ func (a *Audio) Generate(ctx context.Context, text string, force bool) (string, 
 			return asset, nil
 		}
 	}
-	select {
-	case a.slots <- struct{}{}:
-	case <-ctx.Done():
-		return "", ctx.Err()
+	if err := a.limiter.acquire(ctx); err != nil {
+		return "", err
 	}
 	raw, e := a.Synth.Synthesize(ctx, text)
-	<-a.slots
+	a.limiter.release()
 	if e != nil {
 		return "", e
 	}

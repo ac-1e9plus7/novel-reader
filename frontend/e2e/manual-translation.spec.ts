@@ -28,7 +28,7 @@ test("manual and audio workflows work with a failed translator and partially emp
   });
   await page.goto("/");
   await page.locator(".book-card").filter({ hasText: book.title }).click();
-  await page.getByRole("button", { name: "生成翻译", exact: true }).click();
+  await page.getByRole("button", { name: "翻译第1段", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("翻译服务暂时不可用");
   await page.getByRole("button", { name: "准备整章语音" }).click();
   await expect(page.locator(".audio-ready")).toHaveCount(3);

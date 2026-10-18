@@ -482,6 +482,28 @@ input[type="range"] {
 .chapter-list {
   margin: 27px -12px 20px;
 }
+.chapter-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.chapter-row .chapter-link {
+  flex: 1;
+  min-width: 0;
+}
+.chapter-row .chapter-link > span:nth-child(2) {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.chapter-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--muted);
+}
+.chapter-controls .icon {
+  padding: 4px;
+}
 .chapter-link {
   display: flex;
   align-items: center;
@@ -1010,6 +1032,22 @@ input[type="range"] {
   border-bottom: 1px solid var(--line);
   padding: 18px 0;
   font-size: 13px;
+}
+.advanced-settings {
+  border: 1px solid var(--line);
+  padding: 14px;
+  border-radius: 6px;
+  margin-bottom: 20px;
+}
+.advanced-settings summary {
+  cursor: pointer;
+}
+.advanced-settings form {
+  margin-top: 18px;
+}
+.batch-summary .job {
+  flex-wrap: wrap;
+  line-height: 1.8;
 }
 .setting-row small {
   display: block;

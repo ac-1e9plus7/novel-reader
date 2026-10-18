@@ -74,6 +74,9 @@ func TestGeminiOpenRouterFemaleVoiceAndMetadata(t *testing.T) {
 		if r.URL.Path != "/audio/speech" || body["voice"] != "Aoede" || body["response_format"] != "pcm" || body["input"] != "朝の風が吹いた。" {
 			t.Error("speech payload changed transcript or voice")
 		}
+		if body["speed"] != float64(1) {
+			t.Error("speech synthesis must default to original speed 1.0")
+		}
 		options := body["provider"].(map[string]any)["options"].(map[string]any)
 		metadata := options["google-ai-studio"].(map[string]any)["speech_metadata"].(map[string]any)
 		if metadata["style"] == nil {
@@ -163,9 +166,13 @@ func TestDefaultResponsesAndGeminiVoice(t *testing.T) {
 	t.Setenv("TTS_PROVIDER", "openrouter")
 	t.Setenv("TTS_MODEL", "google/gemini-3.8-flash-tts")
 	t.Setenv("TTS_VOICE", "")
+	t.Setenv("TTS_CONCURRENCY", "")
 	c := LoadConfig()
 	if c.LLMAPIStyle != "responses" || c.Voice != "Aoede" {
 		t.Fatal("wrong default protocol or voice")
+	}
+	if c.TTSConcurrency != 10 {
+		t.Fatal("default TTS concurrency must be 10")
 	}
 	t.Setenv("TTS_VOICE", "Sulafat")
 	if LoadConfig().Voice != "Sulafat" {

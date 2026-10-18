@@ -30,9 +30,12 @@ import {
   Bookmark,
   ChevronRight,
   Trash2,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 import { api, ApiError, audioURL } from "./api";
 import ManualTranslationEditor from "./ManualTranslationEditor";
+import AudioSettings from "./AudioSettings";
 import type {
   Book,
   Chapter,
@@ -42,6 +45,7 @@ import type {
   Progress,
   Glossary,
   Config,
+  TranslationBatch,
 } from "./types";
 
 const active = (j: Job) => ["queued", "running"].includes(j.status);
@@ -53,6 +57,7 @@ const states: Record<string, string> = {
   partial_failed: "部分完成",
   cancelled: "已停止",
   interrupted: "已中断",
+  invalidated: "已作废",
 };
 const formatTime = (n: number) =>
   `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, "0")}`;
@@ -113,6 +118,7 @@ function Button({
   );
 }
 export default function App() {
+  const [batches, setBatches] = useState<TranslationBatch[]>([]);
   const [manualChapter, setManualChapter] = useState<Chapter | null>(null);
   const [books, setBooks] = useState<Book[]>([]),
     [book, setBook] = useState<Book | null>(null),
@@ -174,7 +180,9 @@ export default function App() {
     autoPlay = useRef(false),
     polling = useRef(false),
     lastJobs = useRef(""),
+    lastBatches = useRef(""),
     refreshGeneration = useRef(0),
+    deletingChapter = useRef(""),
     pendingJob = useRef(""),
     pendingRequest = useRef(false),
     prefetched = useRef(new Set<string>()),
@@ -219,7 +227,7 @@ export default function App() {
   }, [mode, font]);
   const refresh = useCallback(async () => {
     const c = chapterRef.current;
-    if (!c) return;
+    if (!c || deletingChapter.current === c.id) return;
     const generation = ++refreshGeneration.current;
     const [updated, list] = await Promise.all([
       api<Chapter>("/chapters/" + c.id),
@@ -273,7 +281,13 @@ export default function App() {
   };
   const saveProgress = (seg: string, clip = "", seconds = 0) => {
     const c = chapterRef.current;
-    if (!c || !seg || !c.segments.some((s) => s.id === seg)) return;
+    if (
+      !c ||
+      deletingChapter.current === c.id ||
+      !seg ||
+      !c.segments.some((s) => s.id === seg)
+    )
+      return;
     progressQueue.current = {
       chapter_id: c.id,
       segment_id: seg,
@@ -301,6 +315,7 @@ export default function App() {
   useEffect(() => {
     if (!chapter) return;
     lastJobs.current = "";
+    lastBatches.current = "";
     const events = new EventSource("/api/events?chapter=" + chapter.id);
     events.onmessage = (event) => {
       const list: Job[] = JSON.parse(event.data);
@@ -313,14 +328,34 @@ export default function App() {
         void refresh().catch(fail);
       }
     };
+    events.addEventListener("batches", (event) => {
+      if (chapterRef.current?.id !== chapter.id) return;
+      const list: TranslationBatch[] = JSON.parse((event as MessageEvent).data);
+      setBatches(list);
+      const signature = JSON.stringify(
+        list.map((b) => [b.id, b.status, b.done, b.failed]),
+      );
+      if (signature !== lastBatches.current) {
+        lastBatches.current = signature;
+        void refresh().catch(fail);
+      }
+    });
     events.onerror = () => {
       /* EventSource reconnects and sends a fresh database snapshot. */
     };
     const fallback = window.setInterval(() => {
       if (events.readyState === EventSource.OPEN || polling.current) return;
       polling.current = true;
-      api<Job[]>("/jobs?chapter=" + chapter.id)
-        .then(setJobs)
+      Promise.all([
+        api<Job[]>("/jobs?chapter=" + chapter.id),
+        api<TranslationBatch[]>(`/chapters/${chapter.id}/translation-batches`),
+      ])
+        .then(([jobs, batches]) => {
+          if (chapterRef.current?.id === chapter.id) {
+            setJobs(jobs);
+            setBatches(batches);
+          }
+        })
         .then(refresh)
         .catch(fail)
         .finally(() => {
@@ -354,6 +389,7 @@ export default function App() {
     chapterRef.current = c;
     setSidebar(false);
     setJobs([]);
+    setBatches([]);
     localStorage.setItem("reader.lastBook", c.book_id);
     if (progress?.chapter_id === identity) {
       restoring.current = true;
@@ -444,8 +480,107 @@ export default function App() {
       segments,
       force,
     });
-    setJobs((old) => [j, ...old.filter((x) => x.id !== j.id)]);
+    if (chapterRef.current?.id === c.id && deletingChapter.current !== c.id)
+      setJobs((old) => [j, ...old.filter((x) => x.id !== j.id)]);
     return j;
+  };
+  const translateButton = (segment: Segment) =>
+    !segment.manual && (
+      <button
+        aria-label={`${segment.translation ? "重新翻译" : "翻译"}第${segment.position + 1}段`}
+        disabled={
+          busy || jobs.some((j) => j.kind === "translation" && active(j))
+        }
+        onClick={() =>
+          void run(async () => {
+            await startJob("translation", [segment.id], !!segment.translation);
+          })
+        }
+      >
+        <Languages size={13} />
+        {segment.translation ? "重新翻译此段" : "翻译此段"}
+      </button>
+    );
+  const startBatch = async () => {
+    const c = chapterRef.current;
+    if (!c) return;
+    const batch = await api<TranslationBatch>(
+      `/chapters/${c.id}/translation-batches`,
+      "POST",
+      { revision: c.revision },
+    );
+    if (chapterRef.current?.id === c.id)
+      setBatches((old) => [batch, ...old.filter((b) => b.id !== batch.id)]);
+    setNotice(
+      batch.total
+        ? `已安排 ${batch.total} 个单段翻译任务。`
+        : "本章已有译文，无需补充翻译。",
+    );
+  };
+  const moveChapter = async (target: Chapter, delta: number) => {
+    if (!book) return;
+    const order = chapters.map((c) => c.id),
+      index = order.indexOf(target.id),
+      next = index + delta;
+    if (index < 0 || next < 0 || next >= order.length) return;
+    const updated = [...order];
+    [updated[index], updated[next]] = [updated[next], updated[index]];
+    refreshGeneration.current++;
+    await api(`/books/${book.id}/chapters/order`, "PUT", {
+      expected_order: order,
+      chapter_ids: updated,
+    });
+    setChapters(await api<Chapter[]>(`/books/${book.id}/chapters`));
+    await refresh();
+  };
+  const deleteChapter = async (target: Chapter) => {
+    if (
+      !book ||
+      !window.confirm(
+        `删除章节“${target.title}”？本章原文、译文、历史版本和任务记录将删除，无法撤销。`,
+      )
+    )
+      return;
+    const previous = chapterRef.current,
+      deletingCurrent = previous?.id === target.id;
+    if (deletingCurrent) {
+      activeAudio.current = null;
+      audio.current?.pause();
+      await flushProgress();
+      if (progressQueue.current) throw new Error("请先处理阅读位置保存错误");
+      navigation.current++;
+      refreshGeneration.current++;
+      deletingChapter.current = target.id;
+      chapterRef.current = null;
+    }
+    try {
+      await api(`/chapters/${target.id}`, "DELETE", {
+        revision: target.revision,
+      });
+    } catch (e) {
+      deletingChapter.current = "";
+      if (deletingCurrent) chapterRef.current = previous;
+      throw e;
+    }
+    const list = await api<Chapter[]>(`/books/${book.id}/chapters`);
+    setChapters(list);
+    if (deletingCurrent) {
+      setChapter(null);
+      setCurrent("");
+      setPending("");
+      setPlaying(false);
+      setJobs([]);
+      setDetail(null);
+      progressQueue.current = null;
+      progressRef.current = await api<Progress>(`/books/${book.id}/progress`);
+      if (list.length)
+        await openChapter(list[Math.min(target.position, list.length - 1)].id);
+    } else {
+      await refresh();
+    }
+    deletingChapter.current = "";
+    setNotice("章节已删除。");
+    void loadBooks().catch(fail);
   };
   const chooseClip = async (clip: Clip) => {
     if (!clip.asset_id) {
@@ -849,30 +984,57 @@ export default function App() {
             </Button>
             <div className="chapter-list">
               {chapters.map((c, n) => (
-                <button
-                  key={c.id}
-                  className={
-                    chapter?.id === c.id
-                      ? "chapter-link selected"
-                      : "chapter-link"
-                  }
-                  onClick={() => void run(() => openChapter(c.id))}
-                >
-                  <span className="chapter-no">
-                    {String(n + 1).padStart(2, "0")}
-                  </span>
-                  <span>
-                    {c.title}
-                    <small>
-                      {c.translated > 0
-                        ? `${c.translated}/${c.total} 段已翻译`
-                        : "原文可读 · 未填译文"}
-                    </small>
-                  </span>
-                  {c.total > 0 && c.total === c.translated && (
-                    <Check size={15} />
-                  )}
-                </button>
+                <div className="chapter-row" key={c.id}>
+                  <button
+                    className={
+                      chapter?.id === c.id
+                        ? "chapter-link selected"
+                        : "chapter-link"
+                    }
+                    onClick={() => void run(() => openChapter(c.id))}
+                  >
+                    <span className="chapter-no">
+                      {String(n + 1).padStart(2, "0")}
+                    </span>
+                    <span>
+                      {c.title}
+                      <small>
+                        {c.translated > 0
+                          ? `${c.translated}/${c.total} 段已翻译`
+                          : "原文可读 · 未填译文"}
+                      </small>
+                    </span>
+                    {c.total > 0 && c.total === c.translated && (
+                      <Check size={15} />
+                    )}
+                  </button>
+                  <div className="chapter-controls">
+                    <button
+                      className="icon"
+                      aria-label={`上移章节：${c.title}`}
+                      disabled={busy || n === 0}
+                      onClick={() => void run(() => moveChapter(c, -1))}
+                    >
+                      <ArrowUp size={13} />
+                    </button>
+                    <button
+                      className="icon"
+                      aria-label={`下移章节：${c.title}`}
+                      disabled={busy || n === chapters.length - 1}
+                      onClick={() => void run(() => moveChapter(c, 1))}
+                    >
+                      <ArrowDown size={13} />
+                    </button>
+                    <button
+                      className="icon"
+                      aria-label={`删除章节：${c.title}`}
+                      disabled={busy}
+                      onClick={() => void run(() => deleteChapter(c))}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
             <button className="glossary-link" onClick={showGlossary}>
@@ -953,23 +1115,21 @@ export default function App() {
                     </button>
                   </div>
                   <div className="chapter-actions">
-                    <Button secondary onClick={() => setManualChapter(chapter)}>
-                      <Pencil size={16} />
-                      手动输入译文
-                    </Button>
                     <Button
                       disabled={
                         busy ||
-                        jobs.some((j) => j.kind === "translation" && active(j))
+                        batches.some((b) =>
+                          ["queued", "running"].includes(b.status),
+                        )
                       }
-                      onClick={() =>
-                        void run(async () => {
-                          await startJob("translation");
-                        })
-                      }
+                      onClick={() => void run(startBatch)}
                     >
                       <Languages size={16} />
-                      生成翻译
+                      整章翻译
+                    </Button>
+                    <Button secondary onClick={() => setManualChapter(chapter)}>
+                      <Pencil size={16} />
+                      手动输入译文
                     </Button>
                     <Button
                       secondary
@@ -989,10 +1149,62 @@ export default function App() {
                   </div>
                   {ready < chapter.segments.length && (
                     <p className="translation-optional">
-                      译文可稍后补充。没有译文也能朗读原文、调整读音并保存阅读位置。
+                      “整章翻译”会批量创建单段任务；也可在段落旁单独翻译。没有译文也能阅读和朗读原文。
                     </p>
                   )}
                 </div>
+                {batches[0] && (
+                  <section
+                    className="jobs batch-summary"
+                    aria-label="整章翻译进度"
+                  >
+                    <div className="job">
+                      <span>
+                        整章翻译 · {states[batches[0].status]} ·{" "}
+                        {batches[0].done}/{batches[0].total} 段
+                        {batches[0].failed > 0
+                          ? ` · 失败 ${batches[0].failed} 段`
+                          : ""}
+                      </span>
+                      {["queued", "running"].includes(batches[0].status) ? (
+                        <button
+                          disabled={busy}
+                          onClick={() =>
+                            void run(async () => {
+                              await api(
+                                `/translation-batches/${batches[0].id}/cancel`,
+                                "POST",
+                              );
+                            })
+                          }
+                        >
+                          停止整章翻译
+                        </button>
+                      ) : (
+                        batches[0].status !== "succeeded" && (
+                          <button
+                            disabled={busy}
+                            onClick={() =>
+                              void run(async () => {
+                                const batch = await api<TranslationBatch>(
+                                  `/translation-batches/${batches[0].id}/retry`,
+                                  "POST",
+                                );
+                                setBatches((old) => [
+                                  batch,
+                                  ...old.filter((b) => b.id !== batch.id),
+                                ]);
+                                await refresh();
+                              })
+                            }
+                          >
+                            补齐未完成译文
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </section>
+                )}
                 {jobs.length > 0 && (
                   <section className="jobs" aria-label="处理记录">
                     {jobs.slice(0, 3).map((j) => (
@@ -1027,7 +1239,8 @@ export default function App() {
                             停止
                           </button>
                         ) : (
-                          j.status !== "succeeded" && (
+                          j.status !== "succeeded" &&
+                          j.status !== "invalidated" && (
                             <button
                               onClick={() =>
                                 void run(async () => {
@@ -1098,6 +1311,7 @@ export default function App() {
                             >
                               调整读音
                             </button>
+                            {mode === "ja" && translateButton(seg)}
                             {seg.clips.every((c) => c.asset_id) && (
                               <span className="audio-ready">
                                 <Check size={12} />
@@ -1127,22 +1341,7 @@ export default function App() {
                               {seg.translation ? "校对译文" : "填写译文"}
                             </button>
                             {seg.manual && <span>已人工校对</span>}
-                            {!seg.manual && seg.translation && (
-                              <button
-                                disabled={busy}
-                                onClick={() =>
-                                  void run(async () => {
-                                    await startJob(
-                                      "translation",
-                                      [seg.id],
-                                      true,
-                                    );
-                                  })
-                                }
-                              >
-                                重新翻译
-                              </button>
-                            )}
+                            {translateButton(seg)}
                           </div>
                         </div>
                       )}
@@ -1259,7 +1458,7 @@ export default function App() {
             >
               {[0.65, 0.8, 1, 1.2, 1.5, 2].map((n) => (
                 <option value={n} key={n}>
-                  {n}×
+                  {n === 1 ? "1.0×（原速）" : `${n}×`}
                 </option>
               ))}
             </select>
@@ -1633,6 +1832,14 @@ export default function App() {
             服务地址、密钥、模型和声音在项目 .env
             中设置，重启后生效。已配置不代表连接已验证。生成内容会发送给你配置的模型服务。
           </p>
+          <AudioSettings
+            concurrency={config?.tts_concurrency ?? 10}
+            onSaved={(value) =>
+              setConfig((old) =>
+                old ? { ...old, tts_concurrency: value } : old,
+              )
+            }
+          />
           <Button
             secondary
             disabled={busy}

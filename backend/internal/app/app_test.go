@@ -22,7 +22,7 @@ import (
 
 func testConfig(t *testing.T) Config {
 	t.Helper()
-	return Config{Addr: "127.0.0.1:8787", DataDir: t.TempDir(), FrontendDir: t.TempDir(), ResponsesURL: "http://invalid", ResponsesKey: "test-secret", Model: "test-model", Structured: true, ResponseTimeout: 5 * time.Second, TTSProvider: "openai", TTSURL: "http://invalid", TTSKey: "test-secret", TTSModel: "test-tts", Voice: "test", TTSTimeout: 5 * time.Second, BatchChars: 900, TTSConcurrency: 2, FFmpeg: "missing-ffmpeg-for-tests"}
+	return Config{Addr: "127.0.0.1:8787", DataDir: t.TempDir(), FrontendDir: t.TempDir(), ResponsesURL: "http://invalid", ResponsesKey: "test-secret", Model: "test-model", Structured: true, ResponseTimeout: 5 * time.Second, TTSProvider: "openai", TTSURL: "http://invalid", TTSKey: "test-secret", TTSModel: "test-tts", Voice: "test", TTSTimeout: 5 * time.Second, TTSConcurrency: 2, FFmpeg: "missing-ffmpeg-for-tests"}
 }
 
 type fakeTranslator struct {
@@ -132,16 +132,23 @@ func TestTranslationCoverageValidation(t *testing.T) {
 		t.Fatal(e)
 	}
 }
-func TestPartialRetryKeepsSuccessfulBatches(t *testing.T) {
+func TestSingleParagraphRetryPreservesOtherTranslations(t *testing.T) {
 	tr := &fakeTranslator{failAt: 2}
 	s := newTestServer(t, tr, &fakeSynth{})
 	_, c := seed(t, s.Store, strings.Repeat("あ", 800)+"\n"+strings.Repeat("い", 800)+"\n"+strings.Repeat("う", 800))
-	j, e := s.Engine.Create(c.ID, "translation", 1, nil, false)
+	first, e := s.Engine.Create(c.ID, "translation", 1, []string{c.Segments[0].ID}, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if waitJob(t, s.Store, first.ID).Status != "succeeded" {
+		t.Fatal("first paragraph failed")
+	}
+	j, e := s.Engine.Create(c.ID, "translation", 1, []string{c.Segments[1].ID}, false)
 	if e != nil {
 		t.Fatal(e)
 	}
 	j = waitJob(t, s.Store, j.ID)
-	if j.Status != "partial_failed" || j.Done != 1 {
+	if j.Status != "failed" || j.Done != 0 || j.Total != 1 {
 		t.Fatalf("unexpected job: %+v", j)
 	}
 	before, _ := s.Store.Chapter(c.ID)
@@ -152,19 +159,22 @@ func TestPartialRetryKeepsSuccessfulBatches(t *testing.T) {
 		t.Fatal(e)
 	}
 	j = waitJob(t, s.Store, j.ID)
-	if j.Status != "succeeded" || tr.calls.Load() != 4 {
+	if j.Status != "succeeded" || tr.calls.Load() != 3 {
 		t.Fatalf("retry redid successful batches: %+v calls=%d", j, tr.calls.Load())
 	}
 	after, _ := s.Store.Chapter(c.ID)
 	if after.Segments[0].TranslationRevision != 1 {
 		t.Fatal("successful translation overwritten")
 	}
+	if after.Segments[2].Translation != "" {
+		t.Fatal("unselected paragraph translated")
+	}
 }
 func TestManualEditWinsAgainstInFlightModel(t *testing.T) {
 	tr := &fakeTranslator{gate: make(chan struct{}), started: make(chan struct{})}
 	s := newTestServer(t, tr, &fakeSynth{})
 	_, c := seed(t, s.Store, "「こんにちは。」")
-	j, e := s.Engine.Create(c.ID, "translation", 1, nil, false)
+	j, e := s.Engine.Create(c.ID, "translation", 1, []string{c.Segments[0].ID}, false)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -185,7 +195,7 @@ func TestManualEditWinsAgainstInFlightModel(t *testing.T) {
 	if after.Segments[0].Translation != "人工校对译文" || !after.Segments[0].Manual {
 		t.Fatal("manual text overwritten")
 	}
-	j, e = s.Engine.Create(c.ID, "translation", 1, nil, true)
+	j, e = s.Engine.Create(c.ID, "translation", 1, []string{c.Segments[0].ID}, true)
 	if e != nil || j.Total != 0 {
 		t.Fatal("force should preserve manual text")
 	}
@@ -203,7 +213,8 @@ func TestSourceEditRejectsStaleTaskAndPreservesHistory(t *testing.T) {
 	if e := s.Store.EditSource(c.ID, c.Title, "非法覆盖", 1); !errors.Is(e, ErrConflict) {
 		t.Fatal("revision conflict missing")
 	}
-	j, e := s.Engine.Create(c.ID, "translation", 2, nil, false)
+	updated, _ := s.Store.Chapter(c.ID)
+	j, e := s.Engine.Create(c.ID, "translation", 2, []string{updated.Segments[0].ID}, false)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -324,7 +335,7 @@ func TestCancelAndRestartRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	_, c := seed(t, s.Store, "テスト。")
-	j, e := s.Engine.Create(c.ID, "translation", 1, nil, false)
+	j, e := s.Engine.Create(c.ID, "translation", 1, []string{c.Segments[0].ID}, false)
 	if e != nil {
 		t.Fatal(e)
 	}

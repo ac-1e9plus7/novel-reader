@@ -15,11 +15,20 @@ import (
 //go:embed schema.sql
 var schema string
 
+//go:embed migration_v2.sql
+var migrationV2 string
+
+//go:embed migration_v3.sql
+var migrationV3 string
+
+const schemaVersion = 3
+
 type Store struct {
-	DB    *sql.DB
-	Root  string
-	mu    sync.Mutex
-	lease *flock.Flock
+	DB              *sql.DB
+	Root            string
+	mu              sync.Mutex
+	lease           *flock.Flock
+	MigrationBackup string
 }
 
 func OpenStore(root string) (*Store, error) {
@@ -50,9 +59,9 @@ func OpenStore(root string) (*Store, error) {
 		lock.Unlock()
 		return nil, err
 	}
+	version := 0
 	if hasMigrations > 0 {
-		var version int
-		if err = db.QueryRow("SELECT coalesce(max(version),0) FROM schema_migrations").Scan(&version); err != nil || version != 1 {
+		if err = db.QueryRow("SELECT coalesce(max(version),0) FROM schema_migrations").Scan(&version); err != nil || version < 1 || version > schemaVersion {
 			db.Close()
 			lock.Unlock()
 			return nil, fmt.Errorf("数据库版本不受支持，请使用匹配的应用版本")
@@ -64,6 +73,39 @@ func OpenStore(root string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{DB: db, Root: abs, lease: lock}
+	if version < schemaVersion {
+		if hasMigrations > 0 {
+			if err = os.MkdirAll(filepath.Join(abs, "backups"), 0700); err != nil {
+				s.Close()
+				return nil, err
+			}
+			s.MigrationBackup = filepath.Join(abs, "backups", fmt.Sprintf("before-v%d-%s.sqlite3", schemaVersion, id()))
+			if _, err = db.Exec("VACUUM INTO ?", s.MigrationBackup); err != nil {
+				s.Close()
+				return nil, err
+			}
+		}
+		tx, beginErr := db.Begin()
+		if beginErr != nil {
+			s.Close()
+			return nil, beginErr
+		}
+		if version < 2 {
+			_, err = tx.Exec(migrationV2)
+		}
+		if err == nil && version < 3 {
+			_, err = tx.Exec(migrationV3)
+		}
+		if err != nil {
+			tx.Rollback()
+			s.Close()
+			return nil, err
+		}
+		if err = tx.Commit(); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
 	_, err = db.Exec("UPDATE jobs SET status='interrupted',message='服务已重启，可继续未完成部分' WHERE status IN ('queued','running'); UPDATE job_items SET status='queued' WHERE status='running'")
 	if err != nil {
 		s.Close()

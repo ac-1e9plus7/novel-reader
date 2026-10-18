@@ -23,10 +23,11 @@ test("import, translate, correct, synthesize, reload and preserve reading state"
   await expect(page.locator(".preview p")).toHaveCount(3);
   await page.getByRole("button", { name: "保存章节" }).click();
   await expect(page.locator(".segment")).toHaveCount(3);
-  await page.getByRole("button", { name: "生成翻译", exact: true }).click();
+  await page.getByRole("button", { name: "翻译第1段", exact: true }).click();
   await expect(page.locator(".translation p").first()).toContainText(
     "窗外的风",
   );
+  await expect(page.locator(".untranslated")).toHaveCount(2);
   await page.getByRole("button", { name: "校对译文" }).first().click();
   await page.getByLabel("中文译文", { exact: true }).fill("我校对的第一段。");
   await page.getByRole("button", { name: "保存修改" }).click();
@@ -39,6 +40,12 @@ test("import, translate, correct, synthesize, reload and preserve reading state"
   await expect(
     page.getByRole("button", { name: "暂停", exact: true }),
   ).toBeVisible();
+  await expect(page.getByLabel("播放速度")).toHaveValue("1");
+  expect(
+    await page
+      .locator("audio")
+      .evaluate((a: HTMLAudioElement) => a.playbackRate),
+  ).toBe(1);
   await page.getByRole("button", { name: "暂停", exact: true }).click();
   await page.getByLabel("播放速度").selectOption("0.8");
   await page.getByRole("button", { name: "调整读音" }).first().click();

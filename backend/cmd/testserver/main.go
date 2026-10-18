@@ -63,7 +63,7 @@ func main() {
 	if front == "" {
 		front = "../frontend/dist"
 	}
-	c := app.Config{Addr: "127.0.0.1:8788", DataDir: dir, FrontendDir: front, BatchChars: 2400, TTSConcurrency: 2, Model: "offline-fixture", TTSModel: "offline-tone", TTSProvider: "fixture", FFmpeg: "disabled-in-fixture"}
+	c := app.Config{Addr: "127.0.0.1:8788", DataDir: dir, FrontendDir: front, TTSConcurrency: 10, Model: "offline-fixture", TTSModel: "offline-tone", TTSProvider: "fixture", FFmpeg: "disabled-in-fixture"}
 	s, e := app.NewServer(c, translator{}, speech{})
 	if e != nil {
 		log.Fatal(e)

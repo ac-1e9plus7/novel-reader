@@ -45,9 +45,17 @@ func run() error {
 	}
 	report := map[string]any{"created": time.Now().UTC().Format(time.RFC3339), "model": c.Model, "llm_api_style": c.LLMAPIStyle, "tts_model": c.TTSModel, "voice": c.Voice, "source": source}
 	failed := false
+	chapterInput, err := s.Store.Chapter(cid)
+	if err != nil {
+		return err
+	}
 	for _, kind := range []string{"translation", "audio"} {
 		started := time.Now()
-		j, e := s.Engine.Create(cid, kind, 1, nil, false)
+		var selected []string
+		if kind == "translation" {
+			selected = []string{chapterInput.Segments[0].ID}
+		}
+		j, e := s.Engine.Create(cid, kind, 1, selected, false)
 		if e != nil {
 			return e
 		}

@@ -25,9 +25,15 @@ type Engine struct {
 func NewEngine(s *Store, c Config, t Translator, a *Audio) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{Store: s, Config: c, Translator: t, Audio: a, ctx: ctx, cancel: cancel, cancels: map[string]context.CancelFunc{}}
-	for i := 0; i < 3; i++ {
-		e.wg.Add(1)
-		go e.worker()
+	for _, kind := range []string{"translation", "audio"} {
+		count := 3
+		if kind == "audio" {
+			count = 2
+		}
+		for i := 0; i < count; i++ {
+			e.wg.Add(1)
+			go e.worker(kind)
+		}
 	}
 	return e
 }
@@ -93,10 +99,18 @@ func (e *Engine) Create(chapter, kind string, revision int, selected []string, f
 	if kind != "translation" && kind != "audio" {
 		return Job{}, fmt.Errorf("任务类型无效")
 	}
+	if kind == "translation" && len(selected) != 1 {
+		return Job{}, fmt.Errorf("每次翻译必须且只能选择一个段落")
+	}
 	var active string
-	err = s.DB.QueryRow("SELECT id FROM jobs WHERE chapter_id=? AND kind=? AND status IN ('queued','running') LIMIT 1", chapter, kind).Scan(&active)
+	if kind == "translation" {
+		active, err = activeTranslationJob(s.DB, chapter, selected[0])
+	} else {
+		err = s.DB.QueryRow("SELECT id FROM jobs WHERE chapter_id=? AND kind=? AND status IN ('queued','running') LIMIT 1", chapter, kind).Scan(&active)
+	}
 	if err == nil {
-		return s.Job(active)
+		job, loadErr := s.Job(active)
+		return job, loadErr
 	}
 	if err != sql.ErrNoRows {
 		return Job{}, err
@@ -119,15 +133,6 @@ func (e *Engine) Create(chapter, kind string, revision int, selected []string, f
 		return Job{}, err
 	}
 	payloads := []ItemPayload{}
-	batch := ItemPayload{Terms: g.Terms, GlossaryRevision: g.Revision, ConfigKey: e.Config.translationKey(), Force: force}
-	size := 0
-	flush := func() {
-		if len(batch.Targets) > 0 {
-			payloads = append(payloads, batch)
-			batch = ItemPayload{Terms: g.Terms, GlossaryRevision: g.Revision, ConfigKey: e.Config.translationKey(), Force: force}
-			size = 0
-		}
-	}
 	for n, seg := range c.Segments {
 		if len(wanted) > 0 && !wanted[seg.ID] {
 			continue
@@ -136,23 +141,8 @@ func (e *Engine) Create(chapter, kind string, revision int, selected []string, f
 			if seg.Manual || (!force && seg.Translation != "") {
 				continue
 			}
-			if size+len([]rune(seg.Text)) > e.Config.BatchChars {
-				flush()
-			}
-			if len(batch.Targets) == 0 {
-				start := n - 2
-				if start < 0 {
-					start = 0
-				}
-				for _, contextSeg := range c.Segments[start:n] {
-					batch.Context += contextSeg.Text + "\n"
-				}
-				if n+1 < len(c.Segments) {
-					batch.Context += "\n后续原文参考：" + c.Segments[n+1].Text
-				}
-			}
-			batch.Targets = append(batch.Targets, Target{ID: seg.ID, Text: seg.Text, Version: seg.TranslationRevision})
-			size += len([]rune(seg.Text))
+			part := translationPayload(c, n, g, e.Config, force)
+			payloads = append(payloads, part)
 		} else {
 			for _, clip := range seg.Clips {
 				if clip.AssetID != "" && !force {
@@ -165,7 +155,6 @@ func (e *Engine) Create(chapter, kind string, revision int, selected []string, f
 			}
 		}
 	}
-	flush()
 	j := Job{ID: id(), ChapterID: chapter, Kind: kind, Status: "queued", Revision: revision, Total: len(payloads), Created: now()}
 	if j.Total == 0 {
 		j.Status = "succeeded"
@@ -214,6 +203,12 @@ func (e *Engine) Retry(identity string) (Job, error) {
 	if j.Status == "running" || j.Status == "queued" || j.Status == "succeeded" {
 		return j, fmt.Errorf("此任务无需重试")
 	}
+	if j.Status == "invalidated" {
+		return j, fmt.Errorf("此翻译任务已作废，请在段落旁创建新任务")
+	}
+	if j.Kind == "translation" && len(j.Items) != 1 {
+		return j, fmt.Errorf("旧翻译任务不支持重试，请逐段创建新任务")
+	}
 	var rev, active int
 	if err = s.DB.QueryRow("SELECT revision FROM chapters WHERE id=?", j.ChapterID).Scan(&rev); err != nil {
 		return j, err
@@ -221,7 +216,18 @@ func (e *Engine) Retry(identity string) (Job, error) {
 	if rev != j.Revision {
 		return j, ErrConflict
 	}
-	if err = s.DB.QueryRow("SELECT count(*) FROM jobs WHERE chapter_id=? AND kind=? AND status IN ('queued','running')", j.ChapterID, j.Kind).Scan(&active); err != nil {
+	if j.Kind == "translation" {
+		var p ItemPayload
+		if json.Unmarshal([]byte(j.Items[0].Payload), &p) != nil || len(p.Targets) != 1 {
+			return j, fmt.Errorf("任务数据无效")
+		}
+		_, err = activeTranslationJob(s.DB, j.ChapterID, p.Targets[0].ID)
+		if err == nil {
+			active = 1
+		} else if err != sql.ErrNoRows {
+			return j, err
+		}
+	} else if err = s.DB.QueryRow("SELECT count(*) FROM jobs WHERE chapter_id=? AND kind=? AND status IN ('queued','running')", j.ChapterID, j.Kind).Scan(&active); err != nil {
 		return j, err
 	}
 	if active > 0 {
@@ -234,6 +240,9 @@ func (e *Engine) Retry(identity string) (Job, error) {
 		var p ItemPayload
 		if json.Unmarshal([]byte(item.Payload), &p) != nil {
 			return j, fmt.Errorf("任务数据损坏")
+		}
+		if j.Kind == "translation" && len(p.Targets) != 1 {
+			return j, fmt.Errorf("旧翻译任务不支持重试，请逐段创建新任务")
 		}
 		key := e.Config.translationKey()
 		if j.Kind == "audio" {
@@ -259,7 +268,7 @@ func (e *Engine) Retry(identity string) (Job, error) {
 	}
 	return s.Job(identity)
 }
-func (e *Engine) worker() {
+func (e *Engine) worker(kind string) {
 	defer e.wg.Done()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -268,19 +277,19 @@ func (e *Engine) worker() {
 		case <-e.ctx.Done():
 			return
 		case <-ticker.C:
-			identity, err := e.claim()
+			identity, err := e.claim(kind)
 			if err == nil && identity != "" {
 				e.run(identity)
 			}
 		}
 	}
 }
-func (e *Engine) claim() (string, error) {
+func (e *Engine) claim(kind string) (string, error) {
 	s := e.Store
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var identity string
-	err := s.DB.QueryRow("SELECT id FROM jobs WHERE status='queued' AND cancel=0 ORDER BY created LIMIT 1").Scan(&identity)
+	err := s.DB.QueryRow(`SELECT j.id FROM jobs j WHERE j.status='queued' AND j.cancel=0 AND j.kind=? AND (j.kind!='translation' OR NOT EXISTS(SELECT 1 FROM jobs running WHERE running.chapter_id=j.chapter_id AND running.kind='translation' AND running.status='running')) ORDER BY j.rowid LIMIT 1`, kind).Scan(&identity)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -303,66 +312,19 @@ func (e *Engine) run(identity string) {
 	if j.Cancel {
 		cancel()
 	}
-	summary := ""
-	for _, item := range j.Items {
-		if ctx.Err() != nil {
-			break
-		}
-		if item.Status == "succeeded" {
-			var v string
-			_ = e.Store.DB.QueryRow("SELECT summary FROM job_summaries WHERE job_id=? AND position=?", identity, item.Position).Scan(&v)
-			if v != "" {
-				summary = v
+	if j.Kind == "audio" {
+		e.runAudioItems(ctx, j)
+	} else {
+		for _, item := range j.Items {
+			if ctx.Err() != nil {
+				break
 			}
-			continue
-		}
-		_, _ = e.Store.DB.Exec("UPDATE job_items SET status='running' WHERE id=?", item.ID)
-		var p ItemPayload
-		err = json.Unmarshal([]byte(item.Payload), &p)
-		start := time.Now()
-		var usage json.RawMessage
-		if err == nil {
-			err = e.checkInput(j, p)
-		}
-		if err == nil {
-			if j.Kind == "translation" {
-				p.Context += "\n前文情节摘要：" + summary
-				var result TranslateResult
-				result, err = e.Translator.Translate(ctx, p)
-				usage = result.Usage
-				if err == nil {
-					err = validateTranslation(p.Targets, result.Items)
-				}
-				if err == nil {
-					err = e.commitTranslation(ctx, j, item, p, result)
-					if err == nil {
-						summary = result.Summary
-					}
-				}
-			} else {
-				var asset string
-				asset, err = e.Audio.Generate(ctx, p.Targets[0].Text, p.Force)
-				if err == nil {
-					err = e.commitAudio(ctx, j, item, p, asset)
-				}
+			if item.Status == "succeeded" {
+				continue
 			}
-		}
-		status, message := "succeeded", ""
-		if err != nil {
-			status = "failed"
-			message = safeMessage(err)
-		}
-		usageText := any(nil)
-		if len(usage) > 0 {
-			usageText = string(usage)
-		}
-		_, _ = e.Store.DB.Exec("INSERT INTO generation_attempts VALUES(?,?,?,?,?,?)", id(), item.ID, now(), time.Since(start).Milliseconds(), usageText, status)
-		if err != nil {
-			_, _ = e.Store.DB.Exec("UPDATE job_items SET status=?,message=? WHERE id=?", status, message, item.ID)
-		}
-		_, _ = e.Store.DB.Exec("UPDATE jobs SET done=(SELECT count(*) FROM job_items WHERE job_id=? AND status='succeeded') WHERE id=?", identity, identity)
-		if err != nil && j.Kind == "translation" {
-			break
+			if e.runItem(ctx, j, item) != nil {
+				break
+			}
 		}
 	}
 	var done, total int
@@ -385,6 +347,82 @@ func (e *Engine) run(identity string) {
 	}
 	_, _ = e.Store.DB.Exec("UPDATE jobs SET status=?,message=?,done=? WHERE id=?", status, message, done, identity)
 }
+func (e *Engine) runAudioItems(ctx context.Context, j Job) {
+	items := make(chan JobItem)
+	var workers sync.WaitGroup
+	for i := 0; i < min(32, len(j.Items)); i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for item := range items {
+				if ctx.Err() != nil {
+					return
+				}
+				_ = e.runItem(ctx, j, item)
+			}
+		}()
+	}
+dispatch:
+	for _, item := range j.Items {
+		if item.Status == "succeeded" {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			break dispatch
+		case items <- item:
+		}
+	}
+	close(items)
+	workers.Wait()
+}
+func (e *Engine) runItem(ctx context.Context, j Job, item JobItem) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, _ = e.Store.DB.Exec("UPDATE job_items SET status='running' WHERE id=?", item.ID)
+	var p ItemPayload
+	err := json.Unmarshal([]byte(item.Payload), &p)
+	started := time.Now()
+	var usage json.RawMessage
+	if err == nil {
+		err = e.checkInput(j, p)
+	}
+	if err == nil {
+		if j.Kind == "translation" {
+			var result TranslateResult
+			result, err = e.Translator.Translate(ctx, p)
+			usage = result.Usage
+			if err == nil {
+				err = validateTranslation(p.Targets, result.Items)
+			}
+			if err == nil {
+				err = e.commitTranslation(ctx, j, item, p, result)
+			}
+		} else {
+			var asset string
+			asset, err = e.Audio.Generate(ctx, p.Targets[0].Text, p.Force)
+			if err == nil {
+				err = e.commitAudio(ctx, j, item, p, asset)
+			}
+		}
+	}
+	status, message := "succeeded", ""
+	if err != nil {
+		status = "failed"
+		message = safeMessage(err)
+	}
+	var usageText any
+	if len(usage) > 0 {
+		usageText = string(usage)
+	}
+	_, _ = e.Store.DB.Exec("INSERT INTO generation_attempts VALUES(?,?,?,?,?,?)", id(), item.ID, now(), time.Since(started).Milliseconds(), usageText, status)
+	if err != nil {
+		_, _ = e.Store.DB.Exec("UPDATE job_items SET status=?,message=? WHERE id=?", status, message, item.ID)
+	}
+	_, _ = e.Store.DB.Exec("UPDATE jobs SET done=(SELECT count(*) FROM job_items WHERE job_id=? AND status='succeeded') WHERE id=?", j.ID, j.ID)
+	return err
+}
 func safeMessage(err error) string {
 	if err == context.Canceled {
 		return "任务已停止"
@@ -399,10 +437,17 @@ func safeMessage(err error) string {
 	return v
 }
 func (e *Engine) checkInput(j Job, p ItemPayload) error {
+	if j.Kind == "translation" && (j.Total != 1 || len(p.Targets) != 1) {
+		return fmt.Errorf("每次翻译必须且只能处理一个段落")
+	}
 	var rev, glossary int
-	err := e.Store.DB.QueryRow("SELECT c.revision,b.glossary_revision FROM chapters c JOIN books b ON b.id=c.book_id WHERE c.id=?", j.ChapterID).Scan(&rev, &glossary)
+	var cancelled bool
+	err := e.Store.DB.QueryRow("SELECT c.revision,b.glossary_revision,j.cancel FROM chapters c JOIN books b ON b.id=c.book_id JOIN jobs j ON j.chapter_id=c.id WHERE c.id=? AND j.id=?", j.ChapterID, j.ID).Scan(&rev, &glossary, &cancelled)
 	if err != nil {
 		return err
+	}
+	if cancelled {
+		return context.Canceled
 	}
 	if rev != j.Revision {
 		return ErrConflict

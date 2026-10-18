@@ -71,5 +71,15 @@ export interface Config {
   tts_model: string;
   voice: string;
   flac_enabled: boolean;
-  batch_chars: number;
+  tts_concurrency: number;
+}
+export interface TranslationBatch {
+  id: string;
+  chapter_id: string;
+  revision: number;
+  created: string;
+  status: string;
+  total: number;
+  done: number;
+  failed: number;
 }

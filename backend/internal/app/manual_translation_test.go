@@ -30,7 +30,7 @@ func TestManualReadingAndAudioWithoutTranslationService(t *testing.T) {
 			}
 			defer s.Close()
 			b, ch := seed(t, s.Store, "風が吹いた。\n本を開いた。")
-			translation, e := s.Engine.Create(ch.ID, "translation", ch.Revision, nil, false)
+			translation, e := s.Engine.Create(ch.ID, "translation", ch.Revision, []string{ch.Segments[0].ID}, false)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -122,7 +122,7 @@ func TestManualBatchWinsAgainstInFlightTranslation(t *testing.T) {
 	tr := &fakeTranslator{gate: make(chan struct{}), started: make(chan struct{})}
 	s := newTestServer(t, tr, &fakeSynth{})
 	_, c := seed(t, s.Store, "一。\n二。")
-	j, e := s.Engine.Create(c.ID, "translation", 1, nil, false)
+	j, e := s.Engine.Create(c.ID, "translation", 1, []string{c.Segments[0].ID}, false)
 	if e != nil {
 		t.Fatal(e)
 	}

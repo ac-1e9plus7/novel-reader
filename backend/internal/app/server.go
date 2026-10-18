@@ -29,6 +29,11 @@ func NewServer(c Config, t Translator, synth Synthesizer) (*Server, error) {
 	if e != nil {
 		return nil, e
 	}
+	c.TTSConcurrency, e = store.AudioConcurrency(c.TTSConcurrency)
+	if e != nil {
+		store.Close()
+		return nil, e
+	}
 	provider := &Provider{Config: c}
 	if t == nil {
 		t = provider
@@ -77,7 +82,20 @@ func (s *Server) routes() http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, map[string]any{"status": "ok"}) })
 	m.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		jsonResponse(w, 200, map[string]any{"translation_ready": s.Config.translationReady(), "tts_ready": s.Config.speechReady(), "model": s.Config.Model, "tts_provider": s.Config.TTSProvider, "tts_model": s.Config.TTSModel, "voice": s.Config.Voice, "flac_enabled": s.Audio.enabled, "batch_chars": s.Config.BatchChars})
+		jsonResponse(w, 200, map[string]any{"translation_ready": s.Config.translationReady(), "tts_ready": s.Config.speechReady(), "model": s.Config.Model, "tts_provider": s.Config.TTSProvider, "tts_model": s.Config.TTSModel, "voice": s.Config.Voice, "flac_enabled": s.Audio.enabled, "tts_concurrency": s.Audio.limiter.value()})
+	})
+	m.HandleFunc("PATCH /api/settings/audio", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Concurrency int `json:"concurrency"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		if e := s.Audio.SetConcurrency(in.Concurrency); e != nil {
+			failure(w, e)
+			return
+		}
+		jsonResponse(w, 200, map[string]int{"tts_concurrency": s.Audio.limiter.value()})
 	})
 	m.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
 		v, e := s.Store.Books()
@@ -125,6 +143,33 @@ func (s *Server) routes() http.Handler {
 		}
 		jsonResponse(w, 201, map[string]string{"id": v})
 	})
+	m.HandleFunc("PUT /api/books/{book}/chapters/order", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Expected []string `json:"expected_order"`
+			Ordered  []string `json:"chapter_ids"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		if e := s.Store.ReorderChapters(r.PathValue("book"), in.Expected, in.Ordered); e != nil {
+			failure(w, e)
+			return
+		}
+		jsonResponse(w, 200, map[string]bool{"ok": true})
+	})
+	m.HandleFunc("DELETE /api/chapters/{chapter}", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Revision int `json:"revision"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		if e := s.Engine.DeleteChapter(r.PathValue("chapter"), in.Revision); e != nil {
+			failure(w, e)
+			return
+		}
+		jsonResponse(w, 200, map[string]bool{"ok": true})
+	})
 	m.HandleFunc("GET /api/chapters/{chapter}", func(w http.ResponseWriter, r *http.Request) {
 		v, e := s.Store.Chapter(r.PathValue("chapter"))
 		if e != nil {
@@ -132,6 +177,43 @@ func (s *Server) routes() http.Handler {
 			return
 		}
 		jsonResponse(w, 200, v)
+	})
+	m.HandleFunc("GET /api/chapters/{chapter}/translation-batches", func(w http.ResponseWriter, r *http.Request) {
+		b, e := s.Store.TranslationBatches(r.PathValue("chapter"))
+		if e != nil {
+			failure(w, e)
+			return
+		}
+		jsonResponse(w, 200, b)
+	})
+	m.HandleFunc("POST /api/chapters/{chapter}/translation-batches", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Revision int `json:"revision"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		b, e := s.Engine.CreateTranslationBatch(r.PathValue("chapter"), in.Revision)
+		if e != nil {
+			failure(w, e)
+			return
+		}
+		jsonResponse(w, 202, b)
+	})
+	m.HandleFunc("POST /api/translation-batches/{batch}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if e := s.Engine.CancelTranslationBatch(r.PathValue("batch")); e != nil {
+			failure(w, e)
+			return
+		}
+		jsonResponse(w, 200, map[string]bool{"ok": true})
+	})
+	m.HandleFunc("POST /api/translation-batches/{batch}/retry", func(w http.ResponseWriter, r *http.Request) {
+		b, e := s.Engine.RetryTranslationBatch(r.PathValue("batch"))
+		if e != nil {
+			failure(w, e)
+			return
+		}
+		jsonResponse(w, 202, b)
 	})
 	m.HandleFunc("PATCH /api/chapters/{chapter}/source", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -344,6 +426,14 @@ func (s *Server) routes() http.Handler {
 			}
 			data, _ := json.Marshal(jobs)
 			if _, e = fmt.Fprintf(w, "data: %s\n\n", data); e != nil {
+				return
+			}
+			batches, e := s.Store.TranslationBatches(r.URL.Query().Get("chapter"))
+			if e != nil {
+				return
+			}
+			batchData, _ := json.Marshal(batches)
+			if _, e = fmt.Fprintf(w, "event: batches\ndata: %s\n\n", batchData); e != nil {
 				return
 			}
 			f.Flush()

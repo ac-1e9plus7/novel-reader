@@ -11,7 +11,6 @@ RESPONSES_API_KEY=填写服务密钥
 RESPONSES_MODEL=填写服务可用的模型名称
 RESPONSES_STRUCTURED_OUTPUT=true
 RESPONSES_TIMEOUT_SECONDS=300
-TRANSLATION_BATCH_CHARS=2400
 ```
 
 服务需兼容 `POST /responses`。请求包含 `store=false`、固定来源 ID、上下文、术语表和 JSON Schema；服务不支持 Schema 时设 `RESPONSES_STRUCTURED_OUTPUT=false`，服务端仍进行 JSON 和覆盖校验。模型必须返回 `status=completed`。
@@ -32,9 +31,9 @@ DeepSeek 官方支持 `POST /responses` 和 `text.format=json_schema`，本项�
 
 此前把 DeepSeek 模板设为 Chat Completions 并不意味着它不支持 Responses；当前已纠正默认配置。`LLM_API_STYLE=chat_completions` 仍可显式选择，使用 `/chat/completions`、JSON object 模式及 `finish_reason=stop` 校验。失败时不会自动切换协议重复调用。
 
-每批目标默认不超过 2400 日文字符；不是精确 token 数。原段超过 900 Unicode 字符时内部拆分，保留原文位置和自然段编号。返回上限为 12000 tokens；截断、缺段、重复 ID、空译文会使本批失败。可调小批次后创建新任务。
+每个翻译任务只接受一个显式段落 ID，且只发起该段的生成调用。单任务接口拒绝空选区和多段选区；「整章翻译」通过独立批次接口为缺失译文的段落建立多个单段任务，同章按顺序执行。原段超过 900 Unicode 字符时导入阶段拆为阅读单元，保留原文位置和自然段编号。返回上限为 12000 tokens；截断、重复 ID、空译文使本段失败，不阻止其他段落继续。
 
-同一翻译任务内顺序执行批次，携带前文模型摘要和邻接原文参考。摘要最长保存 500 字，术语表修改会使旧翻译任务失效；已有译文保持可读。模型拒绝、JSON 错误和语义问题不会自动反复请求；可手动重试或校对。
+翻译提供最多前两段及后一段原文作为参考，明确要求模型只翻译目标段落。术语表修改会使旧翻译任务失效；已有译文保持可读。模型拒绝、JSON 错误和语义问题不会自动反复请求；可手动重试或校对。旧 `TRANSLATION_BATCH_CHARS` 配置已移除，遗留值不再生效。
 
 ## 日语朗读
 
@@ -84,14 +83,17 @@ AZURE_SPEECH_VOICE=ja-JP-NanamiNeural
 | `FRONTEND_DIR` | `./frontend/dist` | 构建后的前端 |
 | `RESPONSES_TIMEOUT_SECONDS` | 300 | 5–1800 秒，包含本次传输重试等待 |
 | `TTS_TIMEOUT_SECONDS` | 180 | 5–1800 秒 |
-| `TRANSLATION_BATCH_CHARS` | 2400 | 900–12000，单批目标日文字符数 |
-| `TTS_CONCURRENCY` | 2 | 1–8，全局同时合成上限 |
+| `TTS_CONCURRENCY` | 10 | 1–32，未保存网页高级设置时使用的全局合成并发量 |
 | `FFMPEG_PATH` | `ffmpeg` | 可执行文件名称或完整路径 |
 
-数值超出范围或格式无效时使用默认值。服务有 3 个任务工作协程；每个任务内顺序执行片段。TTS 并发上限不是单个整章任务的并发数量。
+环境变量数值超出范围或格式无效时使用默认值。网页「设置 → 高级设置 → 语音生成并发量」可保存 1–32 的整数，保存到 SQLite 后优先于环境变量，重启仍生效；网页非法数值会被拒绝。
+
+翻译使用 3 个工作协程，同章最多一个单段任务运行，其他章节可以并行。语音有独立任务调度器，每个整章任务并行准备片段，所有章节共享同一个动态并发上限，默认能同时发起 10 个不同片段的合成请求。提高并发量立即放行更多等待请求；调低时不取消在途合成，等其完成后再按新上限调度。并发量不影响音频缓存键、声音或播放速度。
 
 429 和 5xx 最多重试两次，尊重 1–30 秒的整数 `Retry-After`，否则等待 1 / 2 秒；认证、参数错误直接反馈。网络断连与超时不自动重试，用户可以选择重试任务。服务未返回 token 用量时保存空值，不能认定没有计费。
 
 音频先写 WAV，再由单独压缩协程生成 FLAC。逐样本核验无损、数据库发布成功后才删除 WAV。播放器请求 WAV 兼容表示；磁盘缓存为 FLAC 时由纯 Go 解码，不依赖 FFmpeg。播放倍速不重新合成。
+
+OpenAI 兼容和 OpenRouter 合成请求显式使用 `speed=1.0`，Azure 使用默认语速；播放器初始速度也是 1.0，显示为「1.0×（原速）」。已有原速音频不因这项显式设置失效或重新计费。
 
 当前 FLAC 解码依赖可能对 24kHz 文件输出其上游样本覆盖提示；该提示本身不是解码失败。应用仍会核对 PCM 是否完全一致，失败则保留 WAV。
